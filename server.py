@@ -9,9 +9,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("PORT", "8080"))
 ALLOW = os.environ.get("ALLOW_ORIGIN", "*")
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-RATE = int(os.environ.get("RATE_PER_MIN", "15"))
-GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "60"))
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+RATE = int(os.environ.get("RATE_PER_MIN", "30"))
+GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "180"))
 TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "25"))
 
 SYS = {
