@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("PORT", "8080"))
 ALLOW = os.environ.get("ALLOW_ORIGIN", "*")
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 RATE = int(os.environ.get("RATE_PER_MIN", "15"))
 GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "60"))
 TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "25"))
@@ -73,8 +73,12 @@ def ask_gemini(q, x, lang, hist):
     }).encode()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        j = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            j = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:400]
+        raise RuntimeError(f"gemini-http-{e.code}: {detail}")
     cands = j.get("candidates") or []
     if not cands:
         raise RuntimeError("no-candidates: " + json.dumps(j)[:200])
