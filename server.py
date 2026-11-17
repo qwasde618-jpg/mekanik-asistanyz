@@ -12,7 +12,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 RATE = int(os.environ.get("RATE_PER_MIN", "30"))
 GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "180"))
-TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "25"))
+TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "55"))
 
 SYS = {
     "tr": "Sen Mekanik adında, Mekanik Kolaylıklar adlı elektronik/Arduino/mekanik öğrenme sitesinin "
