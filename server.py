@@ -69,7 +69,16 @@ def ask_gemini(q, x, lang, hist):
     body = json.dumps({
         "systemInstruction": {"parts": [{"text": sys_prompt}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 300, "temperature": 0.6},
+        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+        "safetySettings": [
+            {"category": c, "threshold": "BLOCK_ONLY_HIGH"}
+            for c in (
+                "HARM_CATEGORY_HARASSMENT",
+                "HARM_CATEGORY_HATE_SPEECH",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "HARM_CATEGORY_DANGEROUS_CONTENT",
+            )
+        ],
     }).encode()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
@@ -82,10 +91,30 @@ def ask_gemini(q, x, lang, hist):
     cands = j.get("candidates") or []
     if not cands:
         raise RuntimeError("no-candidates: " + json.dumps(j)[:200])
-    parts = cands[0].get("content", {}).get("parts") or []
+    cand = cands[0]
+    parts = cand.get("content", {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts).strip()
     if not text:
-        raise RuntimeError("empty-response")
+        fr = cand.get("finishReason", "?")
+        if fr == "RECITATION" and len(contents) >= 1:
+            # Model metni çok tanıdık bulup reddetti; isteği biraz değiştirip bir kez daha dene.
+            retry_q = q + ("\n\n(Kendi cümlelerinle, kısaca özetleyerek anlat.)" if lang == "tr" else "\n\n(Summarize briefly in your own words.)")
+            contents[-1] = {"role": "user", "parts": [{"text": retry_q[:650]}]}
+            body2 = json.dumps({
+                "systemInstruction": {"parts": [{"text": sys_prompt}]},
+                "contents": contents,
+                "generationConfig": {"maxOutputTokens": 400, "temperature": 0.9},
+            }).encode()
+            req2 = urllib.request.Request(url, data=body2, headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req2, timeout=TIMEOUT) as r2:
+                    j2 = json.loads(r2.read())
+                parts2 = (j2.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+                text = "".join(p.get("text", "") for p in parts2).strip()
+            except Exception:
+                pass
+        if not text:
+            raise RuntimeError(f"empty-response: finishReason={cand.get('finishReason','?')}")
     return text[:900]
 
 
