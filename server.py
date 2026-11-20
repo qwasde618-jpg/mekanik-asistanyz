@@ -3,7 +3,8 @@
 POST /ask  {"q":"...", "x":"...", "lang":"tr", "h":[{"r":"u"|"a","t":"..."}]}  ->  {"a":"cevap"}
 GET  /health
 Sadece Python standart kütüphanesi gerekir (requests da gerekmez, urllib kullanılır)."""
-import json, os, re, threading, time, urllib.request, urllib.error
+import json, os, re, smtplib, threading, time, urllib.request, urllib.error
+from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", "8080"))
@@ -13,6 +14,9 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 RATE = int(os.environ.get("RATE_PER_MIN", "30"))
 GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "180"))
 TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "55"))
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+NOTIFY_TO = os.environ.get("NOTIFY_TO", GMAIL_USER)
 
 SYS = {
     "tr": "Sen Mekanik adında, Mekanik Kolaylıklar adlı elektronik/Arduino/mekanik öğrenme sitesinin "
@@ -118,6 +122,19 @@ def ask_gemini(q, x, lang, hist):
     return text[:900]
 
 
+def send_notify_email(kind, text, by, lang):
+    if not (GMAIL_USER and GMAIL_APP_PASSWORD and NOTIFY_TO):
+        raise RuntimeError("mail-not-configured")
+    body = f"Tür: {kind}\nGönderen: {by or '(bilinmiyor)'}\nDil: {lang}\n\n{text}"
+    msg = MIMEText(body, _charset="utf-8")
+    msg["Subject"] = f"[Mekanik Kolaylıklar] Yeni öneri/şikayet: {kind}"
+    msg["From"] = GMAIL_USER
+    msg["To"] = NOTIFY_TO
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as s:
+        s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        s.sendmail(GMAIL_USER, [NOTIFY_TO], msg.as_string())
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, code, obj):
         b = json.dumps(obj).encode()
@@ -134,9 +151,13 @@ class H(BaseHTTPRequestHandler):
         self._send(204, {})
 
     def do_GET(self):
-        self._send(200, {"ok": True, "configured": bool(API_KEY)}) if self.path == "/health" else self._send(404, {"ok": False})
+        if self.path == "/health":
+            return self._send(200, {"ok": True, "configured": bool(API_KEY), "mail_configured": bool(GMAIL_USER and GMAIL_APP_PASSWORD)})
+        self._send(404, {"ok": False})
 
     def do_POST(self):
+        if self.path == "/notify":
+            return self._handle_notify()
         if self.path != "/ask":
             return self._send(404, {"ok": False})
         ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
@@ -165,6 +186,30 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:
             print("ask error:", e, flush=True)
             self._send(200, {"a": ""})  # site hazır cevaplara geri döner
+
+    def _handle_notify(self):
+        ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+        if not rate_ok(ip):
+            return self._send(429, {"ok": False})
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > 10000:
+                return self._send(413, {"ok": False})
+            j = json.loads(self.rfile.read(n))
+            kind = str(j.get("type", "Öneri"))[:60]
+            text = str(j.get("text", ""))[:2000]
+            by = str(j.get("by", ""))[:60]
+            lang = str(j.get("lang", "tr"))[:10]
+        except Exception:
+            return self._send(400, {"ok": False})
+        if not text.strip():
+            return self._send(200, {"ok": False})
+        try:
+            send_notify_email(kind, text, by, lang)
+            self._send(200, {"ok": True})
+        except Exception as e:
+            print("notify error:", e, flush=True)
+            self._send(200, {"ok": False})
 
     def log_message(self, *a):
         pass
