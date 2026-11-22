@@ -13,20 +13,22 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "")
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 RATE = int(os.environ.get("RATE_PER_MIN", "30"))
 GLOBAL_RATE = int(os.environ.get("GLOBAL_PER_MIN", "180"))
-TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "55"))
+TIMEOUT = int(os.environ.get("ASK_TIMEOUT", "25"))
+MAX_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "900"))
 GMAIL_USER = os.environ.get("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 NOTIFY_TO = os.environ.get("NOTIFY_TO", GMAIL_USER)
 
 SYS = {
     "tr": "Sen Mekanik adında, Mekanik Kolaylıklar adlı elektronik/Arduino/mekanik öğrenme sitesinin "
-          "yardımcı asistanısın. Dostça, kısa (en fazla 4-5 cümle) ve net cevap ver. Emin olmadığın "
-          "teknik bilgi (pin numarası, gerilim gibi) verme; sitenin ilgili sayfasına bakmasını söyle. "
+          "yardımcı asistanısın. Dostça, kısa (en fazla 4-5 cümle) ve net cevap ver. Bildiğin elektronik/Arduino "
+          "bilgisini çekinmeden anlat; yalnızca gerçekten emin olmadığın kart pin numarası ya da gerilim gibi "
+          "ayrıntıyı uydurma, onun için sitenin ilgili sayfasına bakmasını söyle. "
           "Elektronik, Arduino, kodlama ve sitenin kendisiyle ilgili sorulara odaklan; sohbet isteyen "
           "sorulara da sıcak ve kısa cevap ver. Zararlı, yasa dışı ya da müstehcen isteklere yardım etme.",
     "en": "You are Mekanik, the friendly assistant of the Mekanik Kolaylıklar electronics/Arduino/mechanics "
-          "learning site. Answer briefly (max 4-5 sentences) and clearly. Don't state technical specifics "
-          "(pin numbers, voltages) you're not sure about; point to the site's relevant page instead. Focus on "
+          "learning site. Answer briefly (max 4-5 sentences) and clearly. Share what you know about electronics/Arduino "
+          "confidently; only skip details you are truly unsure of (exact pin numbers, voltages) and point to the site instead. Focus on "
           "electronics, Arduino, coding and the site itself; still reply warmly to casual chat. Refuse harmful, "
           "illegal or explicit requests.",
     "de": "Du bist Mekanik, der freundliche Assistent der Lernseite Mekanik Kolaylıklar für Elektronik, "
@@ -40,6 +42,8 @@ SYS = {
 }
 SYS_DEFAULT = SYS["en"]
 
+THINK_OPTS = [{"thinkingBudget": 0}, {"thinkingLevel": "minimal"}, None]
+THINK_IDX = 0
 hits, global_hits = {}, []
 lock = threading.Lock()
 
@@ -61,6 +65,8 @@ def rate_ok(ip):
 
 def ask_gemini(q, x, lang, hist):
     sys_prompt = SYS.get(lang, SYS_DEFAULT)
+    if lang not in SYS:
+        sys_prompt += f"\nAlways answer in the user's language (language code: {lang})."
     if x:
         sys_prompt += ("\n\nKullanıcının o an baktığı sayfa/proje: " if lang == "tr" else "\n\nUser's current page/project: ") + x
     contents = []
@@ -70,56 +76,56 @@ def ask_gemini(q, x, lang, hist):
         if t:
             contents.append({"role": role, "parts": [{"text": t}]})
     contents.append({"role": "user", "parts": [{"text": q[:600]}]})
-    body = json.dumps({
-        "systemInstruction": {"parts": [{"text": sys_prompt}]},
-        "contents": contents,
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
-        "safetySettings": [
-            {"category": c, "threshold": "BLOCK_ONLY_HIGH"}
-            for c in (
-                "HARM_CATEGORY_HARASSMENT",
-                "HARM_CATEGORY_HATE_SPEECH",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "HARM_CATEGORY_DANGEROUS_CONTENT",
-            )
-        ],
-    }).encode()
+    safety = [{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in (
+        "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")]
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            j = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:400]
-        raise RuntimeError(f"gemini-http-{e.code}: {detail}")
-    cands = j.get("candidates") or []
-    if not cands:
+
+    def call(conts, temp):
+        """Düşünmeyi kapatmayı dener (hız + boş cevap sorununu çözer). Model desteklemezse
+        sıradaki ayara, o da olmazsa ayarsız isteğe düşer; çalışan ayar hatırlanır."""
+        global THINK_IDX
+        last = None
+        for idx in range(THINK_IDX, len(THINK_OPTS)):
+            gc = {"maxOutputTokens": MAX_TOKENS, "temperature": temp}
+            if THINK_OPTS[idx] is not None:
+                gc["thinkingConfig"] = THINK_OPTS[idx]
+            body = json.dumps({"systemInstruction": {"parts": [{"text": sys_prompt}]},
+                               "contents": conts, "generationConfig": gc,
+                               "safetySettings": safety}).encode()
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                    THINK_IDX = idx
+                    return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", "replace")[:400]
+                last = RuntimeError(f"gemini-http-{e.code}: {detail}")
+                if e.code == 400 and "think" in detail.lower() and idx + 1 < len(THINK_OPTS):
+                    continue
+                raise last
+        raise last
+
+    def text_of(j):
+        c = (j.get("candidates") or [{}])[0]
+        return "".join(p.get("text", "") for p in (c.get("content", {}).get("parts") or [])).strip(), c
+
+    j = call(contents, 0.7)
+    if not (j.get("candidates") or []):
         raise RuntimeError("no-candidates: " + json.dumps(j)[:200])
-    cand = cands[0]
-    parts = cand.get("content", {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts).strip()
+    text, cand = text_of(j)
     if not text:
         fr = cand.get("finishReason", "?")
-        if fr == "RECITATION" and len(contents) >= 1:
-            # Model metni çok tanıdık bulup reddetti; isteği biraz değiştirip bir kez daha dene.
+        if fr == "RECITATION":
             retry_q = q + ("\n\n(Kendi cümlelerinle, kısaca özetleyerek anlat.)" if lang == "tr" else "\n\n(Summarize briefly in your own words.)")
             contents[-1] = {"role": "user", "parts": [{"text": retry_q[:650]}]}
-            body2 = json.dumps({
-                "systemInstruction": {"parts": [{"text": sys_prompt}]},
-                "contents": contents,
-                "generationConfig": {"maxOutputTokens": 400, "temperature": 0.9},
-            }).encode()
-            req2 = urllib.request.Request(url, data=body2, headers={"Content-Type": "application/json"}, method="POST")
             try:
-                with urllib.request.urlopen(req2, timeout=TIMEOUT) as r2:
-                    j2 = json.loads(r2.read())
-                parts2 = (j2.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
-                text = "".join(p.get("text", "") for p in parts2).strip()
+                text, _ = text_of(call(contents, 0.9))
             except Exception:
                 pass
         if not text:
-            raise RuntimeError(f"empty-response: finishReason={cand.get('finishReason','?')}")
-    return text[:900]
+            raise RuntimeError(f"empty-response: finishReason={fr}")
+    return text[:1200]
 
 
 def send_notify_email(kind, text, by, lang):
